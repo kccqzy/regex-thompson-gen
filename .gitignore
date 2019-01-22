@@ -1,0 +1,13 @@
+.DS_Store
+desktop.ini
+
+*.cabal
+dist/
+dist-newstyle/
+*.o
+*.hi
+*.a
+.stack-work/
+.cabal-sandbox
+cabal.sandbox.config
+cabal.project.local

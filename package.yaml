@@ -1,0 +1,15 @@
+name:                regex-thompson-gen
+version:             0.1.0.0
+github:              "kccqzy/regex-thompson-gen"
+license:             BSD3
+author:              "Zhouyu Qian"
+
+extra-source-files:
+- README.md
+
+dependencies:
+- base >= 4.7 && < 5
+
+library:
+  source-dirs: src
+
