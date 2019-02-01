@@ -5,9 +5,12 @@ module Regex
   , Regex
   , prettyPrint
   , compile
+  , prettyPrintInst
   ) where
 
+import qualified Data.IntSet as IntSet
 import Data.String
+import qualified Text.PrettyPrint.ANSI.Leijen as Pretty
 
 data NERegex
   = Juxta NERegex NERegex
@@ -68,3 +71,27 @@ compile (Alt (compile -> a) (compile -> b)) = concat [[Fork (1 + length a)], a, 
 compile (Ques (compile -> a)) = Fork (length a) : a
 compile (Star (compile -> a)) = concat [[Fork (1 + length a)], a, [Jmp (-2 - length a)]]
 compile (Plus (compile -> a)) = a ++ [Fork (-1 - length a)]
+
+prettyPrintInst :: [Inst] -> String
+prettyPrintInst insts = Pretty.displayS (Pretty.renderPretty 0.8 100 doc) "\n"
+  where
+    jumpOrForkTargets =
+      foldMap
+        (\(i, inst) ->
+           case inst of
+             Jmp j -> IntSet.singleton (i + j + 1)
+             Fork j -> IntSet.singleton (i + j + 1)
+             _ -> mempty)
+        (zip [0 ..] insts)
+    doc = Pretty.vsep (zipWith pprInst [0 ..] insts)
+    pprInst i inst
+      | i `IntSet.member` jumpOrForkTargets = Pretty.fill 10 (formatLoc i <> Pretty.colon) Pretty.<+> instDoc
+      | otherwise = Pretty.fill 10 Pretty.space Pretty.<+> instDoc
+      where
+        instDoc =
+          case inst of
+            Jmp j -> op "jmp" Pretty.<+> formatLoc (i + j + 1)
+            Fork j -> op "fork" Pretty.<+> formatLoc (i + j + 1)
+            Match c -> op "match" Pretty.<+> Pretty.text (show c)
+        op = Pretty.fill 8 . Pretty.text
+        formatLoc absLoc = Pretty.char 'L' <> Pretty.int absLoc
