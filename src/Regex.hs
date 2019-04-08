@@ -6,6 +6,8 @@ module Regex
   , prettyPrint
   , compile
   , prettyPrintInst
+  , BeginOpts(..)
+  , EndOpts(..)
   , match
   ) where
 
@@ -100,20 +102,23 @@ prettyPrintInst insts = Pretty.displayS (Pretty.renderPretty 0.8 100 doc) "\n"
         op = Pretty.fill 8 . Pretty.text
         formatLoc absLoc = Pretty.char 'L' <> Pretty.int absLoc
 
--- | Evaluate instructions with a string. If zero or more characters at the
--- beginning of the string matches, then return True.
-match :: [Inst] -> String -> Bool
-match [] = error "empty instructions"
-match (Seq.fromList -> insts) = go (IntSet.singleton 0) mempty
+data BeginOpts = StartMatchAtBeginning | StartMatchAnywhere
+
+data EndOpts = EndMatchAnywhere | EndMatchAtEnd
+
+-- | Evaluate instructions with a string.
+match :: BeginOpts -> EndOpts -> [Inst] -> String -> Bool
+match begin end (Seq.fromList -> insts) = go (IntSet.singleton 0) mempty
   where
     go :: IntSet.IntSet -> IntSet.IntSet -> String -> Bool
     go runnable blocked str = case IntSet.minView runnable of
-      Nothing | IntSet.null blocked -> False
-              | otherwise -> case str of
-                  [] -> False
-                  (_:ss) -> go blocked mempty ss
+      Nothing -> case str of
+        [] -> False
+        (_:ss) ->
+          let runnable' = case begin of StartMatchAtBeginning -> blocked; StartMatchAnywhere -> IntSet.insert 0 blocked
+          in not (IntSet.null runnable') && go runnable' mempty ss
       Just (i, runnable') -> case Seq.lookup i insts of
-        Nothing -> True
+        Nothing -> case end of EndMatchAnywhere -> True; EndMatchAtEnd -> null str || go runnable' blocked str
         Just (Match c) -> case str of
           [] -> go runnable' blocked str
           (s:_) -> go runnable' (if c == s then IntSet.insert (i+1) blocked else blocked) str
