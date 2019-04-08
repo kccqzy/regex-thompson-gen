@@ -6,9 +6,11 @@ module Regex
   , prettyPrint
   , compile
   , prettyPrintInst
+  , match
   ) where
 
 import qualified Data.IntSet as IntSet
+import qualified Data.Sequence as Seq
 import Data.String
 import qualified Text.PrettyPrint.ANSI.Leijen as Pretty
 
@@ -55,7 +57,9 @@ prettyPrint (Just ne) = prettyPrint' 10 ne
 
 data Inst
   = Match Char
-    -- ^ Match a certain character at current position.
+    -- ^ Match a certain character at current position. If it does not match,
+    -- the current thread dies; otherwise, the current thread is blocked until
+    -- the next character is found.
   | Jmp Int
     -- ^ Transfer execution of the current thread. The @Int@ is the relative
     -- offset from the next instruction.
@@ -95,3 +99,23 @@ prettyPrintInst insts = Pretty.displayS (Pretty.renderPretty 0.8 100 doc) "\n"
             Match c -> op "match" Pretty.<+> Pretty.text (show c)
         op = Pretty.fill 8 . Pretty.text
         formatLoc absLoc = Pretty.char 'L' <> Pretty.int absLoc
+
+-- | Evaluate instructions with a string. If zero or more characters at the
+-- beginning of the string matches, then return True.
+match :: [Inst] -> String -> Bool
+match [] = error "empty instructions"
+match (Seq.fromList -> insts) = go (IntSet.singleton 0) mempty
+  where
+    go :: IntSet.IntSet -> IntSet.IntSet -> String -> Bool
+    go runnable blocked str = case IntSet.minView runnable of
+      Nothing | IntSet.null blocked -> False
+              | otherwise -> case str of
+                  [] -> False
+                  (_:ss) -> go blocked mempty ss
+      Just (i, runnable') -> case Seq.lookup i insts of
+        Nothing -> True
+        Just (Match c) -> case str of
+          [] -> go runnable' blocked str
+          (s:_) -> go runnable' (if c == s then IntSet.insert (i+1) blocked else blocked) str
+        Just (Jmp j) -> go (IntSet.insert (i + j + 1) runnable') blocked str
+        Just (Fork j) -> go (runnable' <> IntSet.fromList [i + j + 1, i + 1]) blocked str
