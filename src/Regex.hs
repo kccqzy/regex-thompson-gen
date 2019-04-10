@@ -9,7 +9,10 @@ module Regex
   , prettyPrintInst
   , BeginOpts(..)
   , EndOpts(..)
+  , evalInsts
   , match
+  , search
+  , fullMatch
   ) where
 
 import qualified Data.IntSet as IntSet
@@ -113,8 +116,8 @@ data BeginOpts = StartMatchAtBeginning | StartMatchAnywhere
 data EndOpts = EndMatchAnywhere | EndMatchAtEnd
 
 -- | Evaluate instructions with a string.
-match :: BeginOpts -> EndOpts -> [Inst] -> String -> Bool
-match begin end (Seq.fromList -> insts) = go mempty (IntSet.singleton 0) mempty
+evalInsts :: BeginOpts -> EndOpts -> [Inst] -> String -> Bool
+evalInsts begin end (Seq.fromList -> insts) = go mempty (IntSet.singleton 0) mempty
   where
     go :: IntSet.IntSet -> IntSet.IntSet -> IntSet.IntSet -> String -> Bool
     go !executed !runnable !blocked str = case IntSet.minView (runnable IntSet.\\ executed) of
@@ -133,3 +136,12 @@ match begin end (Seq.fromList -> insts) = go mempty (IntSet.singleton 0) mempty
         Just Wait -> go' runnable' (IntSet.insert (i+1) blocked) str
         Just (Jmp j) -> go' (IntSet.insert (i + j + 1) runnable') blocked str
         Just (Fork j) -> go' (runnable' <> IntSet.fromList [i + j + 1, i + 1]) blocked str
+
+match :: NERegex -> String -> Bool
+match = evalInsts StartMatchAtBeginning EndMatchAnywhere . compile
+
+search :: NERegex -> String -> Bool
+search = evalInsts StartMatchAnywhere EndMatchAnywhere . compile
+
+fullMatch :: NERegex -> String -> Bool
+fullMatch = evalInsts StartMatchAnywhere EndMatchAtEnd . compile
