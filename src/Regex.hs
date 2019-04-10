@@ -114,20 +114,22 @@ data EndOpts = EndMatchAnywhere | EndMatchAtEnd
 
 -- | Evaluate instructions with a string.
 match :: BeginOpts -> EndOpts -> [Inst] -> String -> Bool
-match begin end (Seq.fromList -> insts) = go (IntSet.singleton 0) mempty
+match begin end (Seq.fromList -> insts) = go mempty (IntSet.singleton 0) mempty
   where
-    go :: IntSet.IntSet -> IntSet.IntSet -> String -> Bool
-    go !runnable !blocked str = case IntSet.minView runnable of
+    go :: IntSet.IntSet -> IntSet.IntSet -> IntSet.IntSet -> String -> Bool
+    go !executed !runnable !blocked str = case IntSet.minView (runnable IntSet.\\ executed) of
       Nothing -> case str of
         [] -> False
         (_:ss) ->
           let runnable' = case begin of StartMatchAtBeginning -> blocked; StartMatchAnywhere -> IntSet.insert 0 blocked
-          in not (IntSet.null runnable') && go runnable' mempty ss
-      Just (i, runnable') -> case Seq.lookup i insts of
-        Nothing -> case end of EndMatchAnywhere -> True; EndMatchAtEnd -> null str || go runnable' blocked str
+          in not (IntSet.null runnable') && go mempty runnable' mempty ss
+      Just (i, runnable') ->
+        let go' = go (IntSet.insert i executed) in
+        case Seq.lookup i insts of
+        Nothing -> case end of EndMatchAnywhere -> True; EndMatchAtEnd -> null str || go' runnable' blocked str
         Just (AssertEq c) -> case str of
-          [] -> go runnable' blocked str
-          (s:_) -> go (if c == s then IntSet.insert (i+1) runnable' else runnable') blocked str
-        Just Wait -> go runnable' (IntSet.insert (i+1) blocked) str
-        Just (Jmp j) -> go (IntSet.insert (i + j + 1) runnable') blocked str
-        Just (Fork j) -> go (runnable' <> IntSet.fromList [i + j + 1, i + 1]) blocked str
+          [] -> go' runnable' blocked str
+          (s:_) -> go' (if c == s then IntSet.insert (i+1) runnable' else runnable') blocked str
+        Just Wait -> go' runnable' (IntSet.insert (i+1) blocked) str
+        Just (Jmp j) -> go' (IntSet.insert (i + j + 1) runnable') blocked str
+        Just (Fork j) -> go' (runnable' <> IntSet.fromList [i + j + 1, i + 1]) blocked str
