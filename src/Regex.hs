@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 module Regex
@@ -23,6 +24,7 @@ data NERegex
   | Ques NERegex
   | Star NERegex
   | Plus NERegex
+  | Dot
   deriving Show
 
 type Regex = Maybe NERegex
@@ -46,6 +48,7 @@ prettyPrint (Just ne) = prettyPrint' 10 ne
       | otherwise = s
     -- pretty print, taking a precedence level to parenthesize automatically
     prettyPrint' :: Int -> NERegex -> String
+    prettyPrint' _ Dot = "."
     prettyPrint' _ (Lit c)
       | c `elem` "[]()\\*+?|" = '\\' : [c]
       | otherwise = [c]
@@ -58,10 +61,11 @@ prettyPrint (Just ne) = prettyPrint' 10 ne
     prettyPrint' p (Plus r) = parenthesizeIf (p < 2) (prettyPrint' 2 r ++ "+")
 
 data Inst
-  = Match Char
+  = AssertEq Char
     -- ^ Match a certain character at current position. If it does not match,
-    -- the current thread dies; otherwise, the current thread is blocked until
-    -- the next character is found.
+    -- the current thread dies; otherwise, the current thread proceeds.
+  | Wait
+    -- ^ Block the current thread. Wake up when the next character arrives.
   | Jmp Int
     -- ^ Transfer execution of the current thread. The @Int@ is the relative
     -- offset from the next instruction.
@@ -72,7 +76,8 @@ data Inst
 
 compile :: NERegex -> [Inst]
 compile (Juxta (compile -> a) (compile -> b)) = a ++ b
-compile (Lit c) = [Match c]
+compile (Lit c) = [AssertEq c, Wait]
+compile Dot = [Wait]
 compile (Alt (compile -> a) (compile -> b)) = concat [[Fork (1 + length a)], a, [Jmp (length b)], b]
 compile (Ques (compile -> a)) = Fork (length a) : a
 compile (Star (compile -> a)) = concat [[Fork (1 + length a)], a, [Jmp (-2 - length a)]]
@@ -98,7 +103,8 @@ prettyPrintInst insts = Pretty.displayS (Pretty.renderPretty 0.8 100 doc) "\n"
           case inst of
             Jmp j -> op "jmp" Pretty.<+> formatLoc (i + j + 1)
             Fork j -> op "fork" Pretty.<+> formatLoc (i + j + 1)
-            Match c -> op "match" Pretty.<+> Pretty.text (show c)
+            AssertEq c -> op "cmpeq" Pretty.<+> Pretty.text (show c)
+            Wait -> op "wait"
         op = Pretty.fill 8 . Pretty.text
         formatLoc absLoc = Pretty.char 'L' <> Pretty.int absLoc
 
@@ -111,7 +117,7 @@ match :: BeginOpts -> EndOpts -> [Inst] -> String -> Bool
 match begin end (Seq.fromList -> insts) = go (IntSet.singleton 0) mempty
   where
     go :: IntSet.IntSet -> IntSet.IntSet -> String -> Bool
-    go runnable blocked str = case IntSet.minView runnable of
+    go !runnable !blocked str = case IntSet.minView runnable of
       Nothing -> case str of
         [] -> False
         (_:ss) ->
@@ -119,8 +125,9 @@ match begin end (Seq.fromList -> insts) = go (IntSet.singleton 0) mempty
           in not (IntSet.null runnable') && go runnable' mempty ss
       Just (i, runnable') -> case Seq.lookup i insts of
         Nothing -> case end of EndMatchAnywhere -> True; EndMatchAtEnd -> null str || go runnable' blocked str
-        Just (Match c) -> case str of
+        Just (AssertEq c) -> case str of
           [] -> go runnable' blocked str
-          (s:_) -> go runnable' (if c == s then IntSet.insert (i+1) blocked else blocked) str
+          (s:_) -> go (if c == s then IntSet.insert (i+1) runnable' else runnable') blocked str
+        Just Wait -> go runnable' (IntSet.insert (i+1) blocked) str
         Just (Jmp j) -> go (IntSet.insert (i + j + 1) runnable') blocked str
         Just (Fork j) -> go (runnable' <> IntSet.fromList [i + j + 1, i + 1]) blocked str
