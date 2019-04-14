@@ -13,8 +13,10 @@ module Regex
   , match
   , search
   , fullMatch
+  , generateCCode
   ) where
 
+import Data.Char
 import qualified Data.IntSet as IntSet
 import qualified Data.Sequence as Seq
 import Data.String
@@ -145,3 +147,88 @@ search = evalInsts StartMatchAnywhere EndMatchAnywhere . compile
 
 fullMatch :: NERegex -> String -> Bool
 fullMatch = evalInsts StartMatchAnywhere EndMatchAtEnd . compile
+
+generateCCode :: BeginOpts -> EndOpts -> [Inst] -> String
+generateCCode begin end insts
+  | length insts > 63 = error "Instructions too long; not yet implemented"
+  | otherwise = unlines prologue ++ middle ++ unlines epilogue
+  where
+    prologue =
+      [ "/* Global variable for NFA state. */"
+      , "static unsigned long long runnable, blocked, executed;"
+      , ""
+      , "/* Result of running the NFA for one step (one codepoint). */"
+      , "enum OneStepResult { DEFINITE_FALSE, DEFINITE_TRUE, NEED_MORE_CHAR };"
+      , ""
+      , "/* Run the NFA for one code point. */"
+      , "static inline enum OneStepResult eval_one_codepoint(unsigned codepoint) {"
+      , "    while(1) {"
+      , "        if (!runnable) {"
+      , "            if (codepoint) {"
+      , case begin of
+          StartMatchAtBeginning -> "                runnable = blocked;"
+          StartMatchAnywhere -> "                runnable = blocked | 1;"
+      , "                blocked = 0;"
+      , "                return runnable ? NEED_MORE_CHAR : DEFINITE_FALSE;"
+      , "            } else {"
+      , "                return DEFINITE_FALSE;"
+      , "            }"
+      , "        } else {"
+      , "            int i = __builtin_ctzll(runnable);"
+      , "            switch (i) {"
+      ]
+    middle =
+      flip concatMap (zip [0 ..] insts) $ \(i, inst) ->
+        unlines $
+        [ "            case " ++ show i ++ ":"
+        , "                runnable &= ~(1ull << " ++ show i ++ ");"
+        , "                executed |=  (1ull << " ++ show i ++ ");"
+        ] ++
+        case inst of
+          Fork j ->
+            [ "                runnable |=  (1ull << " ++ show (i + j + 1) ++ ") &~ executed; // fork"
+            , "                // fall-through"
+            ]
+          Jmp j ->
+            [ "                runnable |=  (1ull << " ++ show (i + j + 1) ++ ") &~ executed; // jump"
+            , "                continue;"
+            ]
+          AssertEq ch ->
+            [ "                if (codepoint != " ++ show (ord ch) ++ ") { continue; } // assert equal to " ++ show ch
+            , "                // fall-through"
+            ]
+          Wait ->
+            [ "                blocked |= (1ull << " ++ show (i + 1) ++ ");  // wait for next"
+            , "                continue;"
+            ]
+    epilogue =
+      [ "            case " ++ show (length insts) ++ ":"
+      , "                runnable &= ~(1ull << " ++ show (length insts) ++ ");"
+      , "                executed |=  (1ull << " ++ show (length insts) ++ ");"
+      , "            default:"
+      , case end of
+          EndMatchAnywhere -> "                return DEFINITE_TRUE;"
+          EndMatchAtEnd -> "                if (!codepoint) { return DEFINITE_TRUE; } else { continue; }"
+      , "            }"
+      , "        }"
+      , "    }"
+      , "}"
+      , ""
+      , "/* Evaluate regular expression with entire string. */"
+      , "static inline bool eval(unsigned char const* str) {"
+      , "    runnable = 1;"
+      , "    blocked = 0;"
+      , "    unsigned codepoint;"
+      , "    while (1) {"
+      , "        codepoint = utf8_decode(&str);"
+      , "        executed = 0;"
+      , "        switch (eval_one_codepoint(codepoint)) {"
+      , "        case DEFINITE_FALSE: return false;"
+      , "        case DEFINITE_TRUE: return true;"
+      , "        case NEED_MORE_CHAR:"
+      , "          // do-nothing"
+      , "          ;"
+      , "        }"
+      , "    }"
+      , "}"
+      ]
