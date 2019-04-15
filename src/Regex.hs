@@ -208,6 +208,7 @@ generateCCode begin end insts
       , "static inline enum OneStepResult eval_one_codepoint(unsigned codepoint) {"
       , "    unsigned long long executed = 0;"
       , "    while (1) {"
+      , "        runnable &= ~executed;"
       , "        if (!runnable) {"
       , "            if (codepoint) {"
       , case begin of
@@ -220,6 +221,7 @@ generateCCode begin end insts
       , "            }"
       , "        } else {"
       , "            int i = __builtin_ctzll(runnable);"
+      , "            runnable &= ~(1ull << i);"
       , "            switch (i) {"
       ]
     middle =
@@ -230,19 +232,18 @@ generateCCode begin end insts
            (s + length block, ) $
            unlines $
            [ "            case " ++ show bi ++ ":"
-           , "                runnable &= ~(1ull << " ++ show bi ++ ");"
-           , "                executed |=  (1ull << " ++ show bi ++ ");"
+           , "                executed |= (1ull << " ++ show bi ++ ");"
            ] ++
            concatMap
              (\(i, inst) ->
                 case inst of
                   Fork j ->
-                    [ "                runnable |=  (1ull << " ++
-                      show (intsetLookupIndex (s + i + j + 1) blockBegin) ++ ") &~ executed; // fork"
+                    [ "                runnable |= (1ull << " ++
+                      show (intsetLookupIndex (s + i + j + 1) blockBegin) ++ "); // fork"
                     ]
                   Jmp j ->
-                    [ "                runnable |=  (1ull << " ++
-                      show (intsetLookupIndex (s + i + j + 1) blockBegin) ++ ") &~ executed; // jump"
+                    [ "                runnable |= (1ull << " ++
+                      show (intsetLookupIndex (s + i + j + 1) blockBegin) ++ "); // jump"
                     , "                continue;"
                     ]
                   AssertEq ch ->
@@ -259,8 +260,7 @@ generateCCode begin end insts
         (zip [(0 :: Int) ..] instBlock)
     epilogue =
       [ "            default:"
-      , "                runnable &= ~(1ull << " ++ show (length instBlock) ++ ");"
-      , "                executed |=  (1ull << " ++ show (length instBlock) ++ ");"
+      , "                executed |= (1ull << " ++ show (length instBlock) ++ ");"
       , case end of
           EndMatchAnywhere -> "                return DEFINITE_TRUE;"
           EndMatchAtEnd -> "                if (!codepoint) { return DEFINITE_TRUE; } else { continue; }"
