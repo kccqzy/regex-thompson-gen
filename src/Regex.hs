@@ -1,5 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ViewPatterns #-}
 module Regex
   ( NERegex(..)
@@ -18,6 +19,8 @@ module Regex
 
 import Data.Char
 import qualified Data.IntSet as IntSet
+import Data.List
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Sequence as Seq
 import Data.String
 import qualified Text.PrettyPrint.ANSI.Leijen as Pretty
@@ -148,11 +151,45 @@ search = evalInsts StartMatchAnywhere EndMatchAnywhere . compile
 fullMatch :: NERegex -> String -> Bool
 fullMatch = evalInsts StartMatchAnywhere EndMatchAtEnd . compile
 
+-- | Given a key and an 'IntSet.IntSet', find out the index at which this key
+-- occurs.
+intsetLookupIndex :: Int -> IntSet.IntSet ->Int
+intsetLookupIndex i is =
+  case IntSet.splitMember i is of
+    (_, False, _) -> error "not found"
+    (pre, True, _) -> IntSet.size pre
+
 generateCCode :: BeginOpts -> EndOpts -> [Inst] -> String
 generateCCode begin end insts
-  | length insts > 63 = error "Instructions too long; not yet implemented"
+  | length instBlock > 63 = error "Instructions too long; not yet implemented"
   | otherwise = unlines prologue ++ middle ++ unlines epilogue
   where
+    instBlock :: [NE.NonEmpty Inst]
+    instBlock =
+      (fmap . fmap)
+        fst
+        (foldr
+           (\ia groups ->
+              case groups of
+                [] -> [ia NE.:| []]
+                g@((_, first) NE.:| _):gs ->
+                  if first
+                    then (ia NE.:| []) : groups
+                    else (ia NE.<| g) : gs)
+           []
+           annotated)
+      where
+        annotated = map (\(i, inst) -> (inst, i `IntSet.member` blockBegin)) (zip [0 ..] insts)
+    blockBegin =
+      IntSet.insert 0 $
+      foldMap
+        (\(i, inst) ->
+           case inst of
+             Jmp j -> IntSet.singleton (i + j + 1)
+             Fork j -> IntSet.singleton (i + j + 1)
+             Wait -> IntSet.singleton (i + 1)
+             _ -> mempty)
+        (zip [0 ..] insts)
     prologue =
       [ "/* Global variable for NFA state. */"
       , "static unsigned long long runnable, blocked, executed;"
@@ -178,34 +215,44 @@ generateCCode begin end insts
       , "            switch (i) {"
       ]
     middle =
-      flip concatMap (zip [0 ..] insts) $ \(i, inst) ->
-        unlines $
-        [ "            case " ++ show i ++ ":"
-        , "                runnable &= ~(1ull << " ++ show i ++ ");"
-        , "                executed |=  (1ull << " ++ show i ++ ");"
-        ] ++
-        case inst of
-          Fork j ->
-            [ "                runnable |=  (1ull << " ++ show (i + j + 1) ++ ") &~ executed; // fork"
-            , "                // fall-through"
-            ]
-          Jmp j ->
-            [ "                runnable |=  (1ull << " ++ show (i + j + 1) ++ ") &~ executed; // jump"
-            , "                continue;"
-            ]
-          AssertEq ch ->
-            [ "                if (codepoint != " ++ show (ord ch) ++ ") { continue; } // assert equal to " ++ show ch
-            , "                // fall-through"
-            ]
-          Wait ->
-            [ "                blocked |= (1ull << " ++ show (i + 1) ++ ");  // wait for next"
-            , "                continue;"
-            ]
+      concat $
+      snd $
+      mapAccumL
+        (\s (bi, NE.toList -> block) ->
+           (s + length block, ) $
+           unlines $
+           [ "            case " ++ show bi ++ ":"
+           , "                runnable &= ~(1ull << " ++ show bi ++ ");"
+           , "                executed |=  (1ull << " ++ show bi ++ ");"
+           ] ++
+           concatMap
+             (\(i, inst) ->
+                case inst of
+                  Fork j ->
+                    [ "                runnable |=  (1ull << " ++
+                      show (intsetLookupIndex (s + i + j + 1) blockBegin) ++ ") &~ executed; // fork"
+                    ]
+                  Jmp j ->
+                    [ "                runnable |=  (1ull << " ++
+                      show (intsetLookupIndex (s + i + j + 1) blockBegin) ++ ") &~ executed; // jump"
+                    , "                continue;"
+                    ]
+                  AssertEq ch ->
+                    [ "                if (codepoint != " ++
+                      show (ord ch) ++ ") { continue; } // assert equal to " ++ show ch
+                    ]
+                  Wait ->
+                    [ "                blocked |= (1ull << " ++
+                      show (intsetLookupIndex (s + i + 1) blockBegin) ++ ");  // wait for next"
+                    , "                continue;"
+                    ])
+             (zip [0 ..] block))
+        0
+        (zip [(0 :: Int) ..] instBlock)
     epilogue =
-      [ "            case " ++ show (length insts) ++ ":"
-      , "                runnable &= ~(1ull << " ++ show (length insts) ++ ");"
-      , "                executed |=  (1ull << " ++ show (length insts) ++ ");"
-      , "            default:"
+      [ "            default:"
+      , "                runnable &= ~(1ull << " ++ show (length instBlock) ++ ");"
+      , "                executed |=  (1ull << " ++ show (length instBlock) ++ ");"
       , case end of
           EndMatchAnywhere -> "                return DEFINITE_TRUE;"
           EndMatchAtEnd -> "                if (!codepoint) { return DEFINITE_TRUE; } else { continue; }"
