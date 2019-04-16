@@ -1,5 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ViewPatterns #-}
 module Regex
@@ -15,6 +16,7 @@ module Regex
   , search
   , fullMatch
   , generateCCode
+  , exampleHtml5EmailRegex
   ) where
 
 import Data.Char
@@ -25,9 +27,23 @@ import qualified Data.Sequence as Seq
 import Data.String
 import qualified Text.PrettyPrint.ANSI.Leijen as Pretty
 
+newtype Chars =
+  Chars (NE.NonEmpty Char)
+  deriving (Show)
+
+instance IsString Chars where
+  fromString [] = error "character group may not be empty"
+  fromString ne = Chars (NE.fromList (parse ne))
+    where
+      parse (a:'-':b:ss) = enumFromTo a b ++ parse ss
+      parse (a:ss) = a : parse ss
+      parse [] = []
+
 data NERegex
   = Juxta NERegex NERegex
   | Lit Char
+  | CharGroup Chars
+  | NotCharGroup Chars
   | Alt NERegex NERegex
   | Ques NERegex
   | Star NERegex
@@ -58,8 +74,12 @@ prettyPrint (Just ne) = prettyPrint' 10 ne
     prettyPrint' :: Int -> NERegex -> String
     prettyPrint' _ Dot = "."
     prettyPrint' _ (Lit c)
-      | c `elem` "[]()\\*+?|" = '\\' : [c]
+      | c `elem` needEscape = '\\' : [c]
       | otherwise = [c]
+      where needEscape :: String
+            needEscape = "[]()\\*+?|"
+    prettyPrint' _ (CharGroup (Chars cs)) = '[' : concatMap escapeCharForCharClass (NE.toList cs) ++ "]"
+    prettyPrint' _ (NotCharGroup (Chars cs)) = "[^" ++ concatMap escapeCharForCharClass (NE.toList cs) ++ "]"
     prettyPrint' p (Juxta r1 r2) =
       parenthesizeIf (p < 3) (prettyPrint' 3 r1 ++ prettyPrint' 3 r2)
     prettyPrint' p (Alt r1 r2) =
@@ -67,11 +87,20 @@ prettyPrint (Just ne) = prettyPrint' 10 ne
     prettyPrint' p (Ques r) = parenthesizeIf (p < 2) (prettyPrint' 2 r ++ "?")
     prettyPrint' p (Star r) = parenthesizeIf (p < 2) (prettyPrint' 2 r ++ "*")
     prettyPrint' p (Plus r) = parenthesizeIf (p < 2) (prettyPrint' 2 r ++ "+")
+    escapeCharForCharClass c
+      | c `elem` needEscape = '\\' : [c]
+      | otherwise = [c]
+      where needEscape :: String
+            needEscape = "^-]\\"
 
 data Inst
-  = AssertEq Char
-    -- ^ Match a certain character at current position. If it does not match,
-    -- the current thread dies; otherwise, the current thread proceeds.
+  = AssertIn Chars
+    -- ^ Match a certain group of characters at current position. If it does not
+    -- match, the current thread dies; otherwise, the current thread proceeds.
+  | AssertNotIn Chars
+    -- ^ Inversely match a certain group of characters at current position. If
+    -- it does match, the current thread dies; otherwise, the current thread
+    -- proceeds.
   | Wait
     -- ^ Block the current thread. Wake up when the next character arrives.
   | Jmp Int
@@ -84,7 +113,9 @@ data Inst
 
 compile :: NERegex -> [Inst]
 compile (Juxta (compile -> a) (compile -> b)) = a ++ b
-compile (Lit c) = [AssertEq c, Wait]
+compile (Lit c) = [AssertIn (Chars (c NE.:| [])), Wait]
+compile (CharGroup cs) = [AssertIn cs, Wait]
+compile (NotCharGroup cs) = [AssertNotIn cs, Wait]
 compile Dot = [Wait]
 compile (Alt (compile -> a) (compile -> b)) = concat [[Fork (1 + length a)], a, [Jmp (length b)], b]
 compile (Ques (compile -> a)) = Fork (length a) : a
@@ -111,7 +142,8 @@ prettyPrintInst insts = Pretty.displayS (Pretty.renderPretty 0.8 100 doc) "\n"
           case inst of
             Jmp j -> op "jmp" Pretty.<+> formatLoc (i + j + 1)
             Fork j -> op "fork" Pretty.<+> formatLoc (i + j + 1)
-            AssertEq c -> op "cmpeq" Pretty.<+> Pretty.text (show c)
+            AssertIn (Chars c) -> op "oneof" Pretty.<+> Pretty.text (show (NE.toList c))
+            AssertNotIn (Chars c) -> op "notoneof" Pretty.<+> Pretty.text (show (NE.toList c))
             Wait -> op "wait"
         op = Pretty.fill 8 . Pretty.text
         formatLoc absLoc = Pretty.char 'L' <> Pretty.int absLoc
@@ -135,9 +167,12 @@ evalInsts begin end (Seq.fromList -> insts) = go mempty (IntSet.singleton 0) mem
         let go' = go (IntSet.insert i executed) in
         case Seq.lookup i insts of
         Nothing -> case end of EndMatchAnywhere -> True; EndMatchAtEnd -> null str || go' runnable' blocked str
-        Just (AssertEq c) -> case str of
+        Just (AssertIn (Chars cs)) -> case str of
           [] -> go' runnable' blocked str
-          (s:_) -> go' (if c == s then IntSet.insert (i+1) runnable' else runnable') blocked str
+          (s:_) -> go' (if s `elem` cs then IntSet.insert (i+1) runnable' else runnable') blocked str
+        Just (AssertNotIn (Chars cs)) -> case str of
+          [] -> go' runnable' blocked str
+          (s:_) -> go' (if s `notElem` cs then IntSet.insert (i+1) runnable' else runnable') blocked str
         Just Wait -> go' runnable' (IntSet.insert (i+1) blocked) str
         Just (Jmp j) -> go' (IntSet.insert (i + j + 1) runnable') blocked str
         Just (Fork j) -> go' (runnable' <> IntSet.fromList [i + j + 1, i + 1]) blocked str
@@ -231,9 +266,7 @@ generateCCode begin end insts
         (\s (bi, NE.toList -> block) ->
            (s + length block, ) $
            unlines $
-           [ "            case " ++ show bi ++ ":"
-           , "                executed |= (1ull << " ++ show bi ++ ");"
-           ] ++
+           ["            case " ++ show bi ++ ":", "                executed |= (1ull << " ++ show bi ++ ");"] ++
            concatMap
              (\(i, inst) ->
                 case inst of
@@ -246,9 +279,13 @@ generateCCode begin end insts
                       show (intsetLookupIndex (s + i + j + 1) blockBegin) ++ "); // jump"
                     , "                continue;"
                     ]
-                  AssertEq ch ->
-                    [ "                if (codepoint != " ++
-                      show (ord ch) ++ ") { continue; } // assert equal to " ++ show ch
+                  AssertNotIn (Chars cs) ->
+                    [ "                if (" ++
+                      generateCharGroup cs ++ ") { continue; } // assert equal to " ++ show (NE.toList cs)
+                    ]
+                  AssertIn (Chars cs) ->
+                    [ "                if (!(" ++
+                      generateCharGroup cs ++ ")) { continue; } // assert equal to " ++ show (NE.toList cs)
                     ]
                   Wait ->
                     [ "                blocked |= (1ull << " ++
@@ -287,3 +324,30 @@ generateCCode begin end insts
       , ""
       , "#endif"
       ]
+    generateCharGroup cs =
+      foldr1
+        (\a b -> a ++ " || " ++ b)
+        (fmap
+           (\(c, d) ->
+              if c == d
+                then "codepoint == " ++ show c
+                else "(codepoint >= " ++ show c ++ " && codepoint <= " ++ show d ++ ")")
+           (toGroup sorted))
+      where
+        sorted = IntSet.toList (IntSet.fromList (map ord (NE.toList cs)))
+        toGroup :: [Int] -> [(Int, Int)]
+        toGroup =
+          foldr
+            (\c gs ->
+               case gs of
+                 ((d, e):gr)
+                   | c + 1 == d -> (c, e) : gr
+                 _ -> (c, c) : gs)
+            []
+
+
+exampleHtml5EmailRegex :: NERegex
+exampleHtml5EmailRegex =
+  Plus (CharGroup "a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-") `Juxta` "@" `Juxta` CharGroup "a-zA-Z0-9" `Juxta`
+  Ques (Star (CharGroup "a-zA-Z0-9-") `Juxta` CharGroup "a-zA-Z0-9") `Juxta`
+  Star ("." `Juxta` CharGroup "a-zA-Z0-9" `Juxta` Ques (Star (CharGroup "a-zA-Z0-9-") `Juxta` CharGroup "a-zA-Z0-9"))
