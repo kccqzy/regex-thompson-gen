@@ -142,8 +142,8 @@ prettyPrintInst insts = Pretty.displayS (Pretty.renderPretty 0.8 100 doc) "\n"
           case inst of
             Jmp j -> op "jmp" Pretty.<+> formatLoc (i + j + 1)
             Fork j -> op "fork" Pretty.<+> formatLoc (i + j + 1)
-            AssertIn (Chars c) -> op "oneof" Pretty.<+> Pretty.text (show (NE.toList c))
-            AssertNotIn (Chars c) -> op "notoneof" Pretty.<+> Pretty.text (show (NE.toList c))
+            AssertIn (Chars c) -> op "match" Pretty.<+> Pretty.text (show (NE.toList c))
+            AssertNotIn (Chars c) -> op "nomatch" Pretty.<+> Pretty.text (show (NE.toList c))
             Wait -> op "wait"
         op = Pretty.fill 8 . Pretty.text
         formatLoc absLoc = Pretty.char 'L' <> Pretty.int absLoc
@@ -239,7 +239,10 @@ generateCCode begin end insts
       , "/* Result of running the NFA for one step (one codepoint). */"
       , "enum OneStepResult { DEFINITE_FALSE, DEFINITE_TRUE, NEED_MORE_CHAR };"
       , ""
-      , "/* Run the NFA for one code point. */"
+      , "/* Run the NFA for one code point."
+      , "   Raw instructions:"
+      , prettyPrintInst insts
+      , " */"
       , "static inline enum OneStepResult eval_one_codepoint(unsigned codepoint) {"
       , "    unsigned long long executed = 0;"
       , "    while (1) {"
