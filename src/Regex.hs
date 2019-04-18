@@ -1,5 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -8,6 +9,7 @@ module Regex
   , Regex
   , prettyPrint
   , compile
+  , generate
   , prettyPrintInst
   , BeginOpts(..)
   , EndOpts(..)
@@ -19,7 +21,10 @@ module Regex
   , exampleHtml5EmailRegex
   ) where
 
+import Control.Applicative
+import Control.Monad
 import Data.Char
+import Data.Containers.ListUtils (nubIntOn)
 import qualified Data.IntSet as IntSet
 import Data.List
 import qualified Data.List.NonEmpty as NE
@@ -121,6 +126,44 @@ compile (Alt (compile -> a) (compile -> b)) = concat [[Fork (1 + length a)], a, 
 compile (Ques (compile -> a)) = Fork (length a) : a
 compile (Star (compile -> a)) = concat [[Fork (1 + length a)], a, [Jmp (-2 - length a)]]
 compile (Plus (compile -> a)) = a ++ [Fork (-1 - length a)]
+
+generate :: NERegex -> [String]
+generate (Lit c) = [[c]]
+generate (CharGroup (Chars cs)) = fmap pure (nubIntOn ord (NE.toList cs))
+generate (NotCharGroup (Chars cs)) =
+  let css = IntSet.fromList (map ord (NE.toList cs))
+  in [[c] | c <- [' ' ..], not (ord c `IntSet.notMember` css)]
+generate (Ques (generate -> l)) = "" : l
+generate (Juxta (generate -> la) (generate -> lb)) = unDovetail (liftA2 (++) (Dovetail la) (Dovetail lb))
+generate (Alt (generate -> la) (generate -> lb)) = interleave la lb
+generate (Star (generate -> a)) = unDovetail $ Dovetail [0..] >>= \i -> concat <$> replicateM i (Dovetail a)
+generate (Plus (generate -> a)) = unDovetail $ Dovetail [1..] >>= \i -> concat <$> replicateM i (Dovetail a)
+generate Dot = fmap pure [' '..]
+
+newtype Dovetail a = Dovetail
+  { unDovetail :: [a]
+  } deriving (Functor)
+
+instance Applicative Dovetail where
+  pure = Dovetail . pure
+  (<*>) = ap
+
+instance Monad Dovetail where
+  Dovetail m >>= f = Dovetail (diagonal (map (unDovetail . f) m))
+    where
+      diagonal = concat . stripe
+        where
+          stripe [] = []
+          stripe ([]:xss) = stripe xss
+          stripe ((x:xs):xss) = [x] : zipCons xs (stripe xss)
+          zipCons [] ys = ys
+          zipCons xs [] = map (: []) xs
+          zipCons (x:xs) (y:ys) = (x : y) : zipCons xs ys
+
+interleave :: [a] -> [a] -> [a]
+interleave [] bs = bs
+interleave as [] = as
+interleave (a:as) (b:bs) = a:b:interleave as bs
 
 prettyPrintInst :: [Inst] -> String
 prettyPrintInst insts = Pretty.displayS (Pretty.renderPretty 0.8 100 doc) "\n"
